@@ -1,0 +1,25 @@
+# Google Gmail & Calendar APIs
+google-api-python-client
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+
+# Excel / Data Processing
+pandas
+openpyxl
+
+# Environment variables / secrets
+python-dotenv
+
+# HTTP requests
+requests
+
+# llm
+groq
+
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+jinja2
+python-multipart

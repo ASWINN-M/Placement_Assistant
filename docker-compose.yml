@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: placement_db
+    environment:
+      POSTGRES_USER: placement
+      POSTGRES_PASSWORD: placement
+      POSTGRES_DB: placement
+    ports:
+      - "5433:5432"
+    volumes:
+      - placement_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U placement -d placement"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  join:
+    build: .
+    container_name: placement_join
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+psycopg2://placement:placement@db:5432/placement
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+    volumes:
+      # Keep OAuth tokens / secrets on the host (already authorized once)
+      - ./Backend/credentials.json:/app/Backend/credentials.json:ro
+      - ./Backend/token.json:/app/Backend/token.json
+      - ./Backend/.env:/app/Backend/.env:ro
+    restart: unless-stopped
+
+volumes:
+  placement_pgdata:

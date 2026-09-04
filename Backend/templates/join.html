@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Placement alerts — join once</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f1ea;
+      --card: #fffdf8;
+      --ink: #1c1917;
+      --muted: #78716c;
+      --line: #e7e0d4;
+      --accent: #1d4e4a;
+      --accent-2: #c45c26;
+      --danger: #b42318;
+      --ok: #176c3a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: Georgia, "Times New Roman", serif;
+      background:
+        radial-gradient(1200px 500px at 10% -10%, #efe7d6 0%, transparent 55%),
+        var(--bg);
+      color: var(--ink);
+    }
+    main {
+      max-width: 420px;
+      margin: 0 auto;
+      padding: 48px 20px 64px;
+    }
+    h1 {
+      font-size: 1.65rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      margin: 0 0 8px;
+    }
+    .lede {
+      color: var(--muted);
+      font-size: 0.98rem;
+      line-height: 1.45;
+      margin: 0 0 28px;
+    }
+    form, .panel {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 22px;
+      box-shadow: 0 10px 30px rgba(28, 25, 23, 0.06);
+    }
+    label {
+      display: block;
+      font-size: 0.82rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin: 14px 0 6px;
+    }
+    label:first-child { margin-top: 0; }
+    input, select {
+      width: 100%;
+      font: 1rem/1.4 system-ui, sans-serif;
+      padding: 12px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--ink);
+    }
+    input:focus, select:focus {
+      outline: 2px solid var(--accent);
+      border-color: transparent;
+    }
+    button {
+      margin-top: 20px;
+      width: 100%;
+      border: 0;
+      border-radius: 999px;
+      padding: 13px 16px;
+      font: 600 1rem/1.2 system-ui, sans-serif;
+      background: var(--accent);
+      color: #f8faf8;
+      cursor: pointer;
+    }
+    button:disabled {
+      opacity: 0.55;
+      cursor: wait;
+    }
+    .msg {
+      margin-top: 14px;
+      font-family: system-ui, sans-serif;
+      font-size: 0.92rem;
+      line-height: 1.4;
+    }
+    .msg.error { color: var(--danger); }
+    .msg.ok { color: var(--ok); }
+    .hidden { display: none; }
+    .note {
+      margin-top: 18px;
+      font-size: 0.85rem;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Join placement alerts</h1>
+    <p class="lede">
+      One-time entry. We only use this to match shortlists and send calendar invites
+      to your college mail. No account. No dashboard.
+    </p>
+
+    <form id="join-form">
+      <label for="name">Full name</label>
+      <input id="name" name="name" autocomplete="name" required />
+
+      <label for="neo_id">Neo ID</label>
+      <input id="neo_id" name="neo_id" required />
+
+      <label for="reg_no">Registration number</label>
+      <input id="reg_no" name="reg_no" required />
+
+      <label for="college_email">College email</label>
+      <input id="college_email" name="college_email" type="email"
+             placeholder="name@vitapstudent.ac.in" required />
+
+      <label for="degree">Degree</label>
+      <select id="degree" name="degree" required>
+        <option value="">Select degree</option>
+        <option>B.Tech</option>
+        <option>M.Tech</option>
+        <option>MBA</option>
+        <option>Other</option>
+      </select>
+
+      <label for="branch">Branch</label>
+      <select id="branch" name="branch" required>
+        <option value="">Select branch</option>
+        <option>CSE Core</option>
+        <option>CSE AI/ML</option>
+        <option>CSE Data Science</option>
+        <option>IT</option>
+        <option>ECE</option>
+        <option>EEE</option>
+        <option>Mechanical</option>
+        <option>Civil</option>
+        <option>Biotechnology</option>
+        <option>Other</option>
+      </select>
+
+      <button type="submit" id="join-btn">Proceed</button>
+      <p class="msg" id="join-msg"></p>
+    </form>
+
+    <form id="otp-form" class="hidden">
+      <p class="lede" id="otp-lede"></p>
+      <label for="otp">Code from email</label>
+      <input id="otp" name="otp" inputmode="numeric" maxlength="6" required />
+      <input type="hidden" id="pending_id" />
+      <button type="submit" id="otp-btn">Verify</button>
+      <p class="msg" id="otp-msg"></p>
+    </form>
+
+    <div id="done" class="panel hidden">
+      <p class="msg ok">You're in. You can close this page.</p>
+      <p class="note">
+        When CDC posts a drive for your branch, or a shortlist that includes
+        your Neo ID / reg no, the event is added to calendar and an invite
+        goes to your college email.
+      </p>
+    </div>
+  </main>
+
+  <script>
+    const joinForm = document.getElementById("join-form");
+    const otpForm = document.getElementById("otp-form");
+    const done = document.getElementById("done");
+
+    joinForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const btn = document.getElementById("join-btn");
+      const msg = document.getElementById("join-msg");
+      btn.disabled = true;
+      msg.textContent = "";
+      msg.className = "msg";
+
+      const body = {
+        name: document.getElementById("name").value.trim(),
+        neo_id: document.getElementById("neo_id").value.trim(),
+        reg_no: document.getElementById("reg_no").value.trim(),
+        college_email: document.getElementById("college_email").value.trim(),
+        degree: document.getElementById("degree").value.trim(),
+        branch: document.getElementById("branch").value.trim(),
+      };
+
+      try {
+        const res = await fetch("/api/join", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Could not start verification.");
+
+        document.getElementById("pending_id").value = data.pending_id;
+        document.getElementById("otp-lede").textContent =
+          "Enter the 6-digit code sent to " + body.college_email + ".";
+        joinForm.classList.add("hidden");
+        otpForm.classList.remove("hidden");
+      } catch (err) {
+        msg.textContent = err.message;
+        msg.classList.add("error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    otpForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const btn = document.getElementById("otp-btn");
+      const msg = document.getElementById("otp-msg");
+      btn.disabled = true;
+      msg.textContent = "";
+      msg.className = "msg";
+
+      try {
+        const res = await fetch("/api/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            pending_id: Number(document.getElementById("pending_id").value),
+            otp: document.getElementById("otp").value.trim(),
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Verification failed.");
+        otpForm.classList.add("hidden");
+        done.classList.remove("hidden");
+      } catch (err) {
+        msg.textContent = err.message;
+        msg.classList.add("error");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>

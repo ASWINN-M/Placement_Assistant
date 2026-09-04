@@ -1,0 +1,17 @@
+[project]
+name = "placement-automation"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "google-api-python-client>=2.200.0",
+    "google-auth>=2.57.0",
+    "google-auth-httplib2>=0.4.2",
+    "google-auth-oauthlib>=1.4.1",
+    "groq>=1.7.0",
+    "openpyxl>=3.1.5",
+    "pandas>=3.0.5",
+    "python-dotenv>=1.2.3",
+    "requests>=2.34.2",
+]
