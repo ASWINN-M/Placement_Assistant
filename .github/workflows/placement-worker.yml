@@ -29,14 +29,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r ../requirements.txt
 
-      - name: Restore processed message ids
-        uses: actions/cache/restore@v4
-        with:
-          path: Backend/processed_messages.json
-          key: processed-messages-${{ github.run_id }}
-          restore-keys: |
-            processed-messages-
-
       - name: Write secrets into Backend/
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -66,16 +58,5 @@ jobs:
           printf '%s\n' "${GMAIL_TOKEN_JSON}" > token.json
           printf '%s\n' "${CALENDAR_TOKEN_JSON}" > calendar_token.json
 
-          if [ ! -f processed_messages.json ]; then
-            echo "[]" > processed_messages.json
-          fi
-
       - name: Run placement worker
         run: python gmail_services.py
-
-      - name: Save processed message ids
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: Backend/processed_messages.json
-          key: processed-messages-${{ github.run_id }}

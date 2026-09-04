@@ -3,6 +3,7 @@ import os
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
+from threading import Thread
 
 from contextlib import asynccontextmanager
 
@@ -189,6 +190,7 @@ def verify(payload: VerifyRequest):
     if not otp.isdigit():
         raise HTTPException(status_code=400, detail="Enter the 6-digit code.")
 
+    neo_id_for_backfill = None
     session = get_db_session()
 
     try:
@@ -235,10 +237,28 @@ def verify(payload: VerifyRequest):
                 )
             )
 
+        neo_id_for_backfill = pending.neo_id
         session.delete(pending)
         session.commit()
 
-        return {"ok": True}
-
     finally:
         session.close()
+
+    def _backfill(neo_id=neo_id_for_backfill):
+        try:
+            from gmail_services import run_worker
+
+            run_worker(focus_neo_ids=[neo_id], max_results=40)
+        except Exception as error:
+            print(f"Instant backfill failed for {neo_id}: {error}")
+
+    Thread(target=_backfill, daemon=True).start()
+
+    return {
+        "ok": True,
+        "backfill": "started",
+        "message": (
+            "You're in. We're checking recent placement emails "
+            "for you now and will add eligible calendar events."
+        ),
+    }

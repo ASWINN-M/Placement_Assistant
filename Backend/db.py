@@ -113,6 +113,20 @@ class PendingSignup(Base):
     )
 
 
+class StudentMessageProcessed(Base):
+    """Tracks which CDC mails were already handled for which student."""
+
+    __tablename__ = "student_message_processed"
+
+    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    neo_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+
 def init_db():
     Base.metadata.create_all(bind=engine)
 

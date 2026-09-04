@@ -15,6 +15,12 @@ from calendar_service import (
 )
 from students_repo import get_verified_students, ensure_student_columns
 from eligibility import filter_students_by_eligibility
+from processed_repo import (
+    ensure_processed_table,
+    get_processed_neo_ids,
+    mark_students_processed,
+    message_fully_handled,
+)
 
 
 SCOPES = [
@@ -25,8 +31,6 @@ SCOPES = [
 CDC_EMAIL = "students.cdc2027@vitap.ac.in"
 
 STUDENT_ID = "I5Y4H3N6"
-
-PROCESSED_FILE = "processed_messages.json"
 
 
 def authenticate_gmail():
@@ -356,45 +360,6 @@ def check_student_shortlisted(
     return False, None
 
 
-def load_processed_messages():
-    if not os.path.exists(
-        PROCESSED_FILE
-    ):
-        return set()
-
-    try:
-
-        with open(
-            PROCESSED_FILE,
-            "r"
-        ) as file:
-
-            return set(
-                json.load(file)
-            )
-
-    except (
-        json.JSONDecodeError,
-        OSError
-    ):
-        return set()
-
-
-def save_processed_messages(
-    processed_messages
-):
-    with open(
-        PROCESSED_FILE,
-        "w"
-    ) as file:
-
-        json.dump(
-            list(processed_messages),
-            file,
-            indent=2
-        )
-
-
 def is_placement_email(
     subject,
     body
@@ -427,276 +392,102 @@ def process_email(
     gmail_service,
     calendar_service,
     message,
-    processed_messages
+    students,
+    focus_neo_ids=None,
 ):
     message_id = message["id"]
 
-    headers = get_email_headers(
-        message
-    )
-
-    subject = headers.get(
-        "subject",
-        "No Subject"
-    )
-
-    sender = headers.get(
-        "from",
-        "Unknown Sender"
-    )
-
-    date = headers.get(
-        "date",
-        "Unknown Date"
-    )
-
-    body = extract_email_body(
-        message["payload"]
-    )
-
-    attachments = find_attachments(
-        message["payload"]
-    )
+    headers = get_email_headers(message)
+    subject = headers.get("subject", "No Subject")
+    sender = headers.get("from", "Unknown Sender")
+    date = headers.get("date", "Unknown Date")
+    body = extract_email_body(message["payload"])
+    attachments = find_attachments(message["payload"])
 
     print("\n" + "=" * 60)
     print("PROCESSING CDC EMAIL")
     print("=" * 60)
-
     print(f"\nFrom    : {sender}")
     print(f"Subject : {subject}")
     print(f"Date    : {date}")
 
-    # Ignore unrelated CDC emails
-    if not is_placement_email(
-        subject,
-        body
-    ):
+    student_neo_ids = [student["neo_id"] for student in students]
 
-        print(
-            "\n✗ Not a placement-related email."
-        )
+    if not is_placement_email(subject, body):
+        print("\n✗ Not a placement-related email.")
+        mark_students_processed(message_id, student_neo_ids)
+        return True
 
-        processed_messages.add(
-            message_id
-        )
-
-        return
-
-    print(
-        "\n✓ Placement-related email detected."
-    )
+    print("\n✓ Placement-related email detected.")
 
     excel_attachments = []
-
     for attachment in attachments:
-
-        filename = attachment[
-            "filename"
-        ].lower()
-
-        mime_type = (
-            attachment["mime_type"]
-            or ""
-        )
-
-        if filename.endswith(
-            (".xlsx", ".xls")
-        ):
-
-            excel_attachments.append(
-                attachment
-            )
-
-        elif mime_type.startswith(
-            "image/"
-        ):
-
-            print(
-                f"✓ Ignoring image: "
-                f"{attachment['filename']}"
-            )
-
+        filename = attachment["filename"].lower()
+        mime_type = attachment["mime_type"] or ""
+        if filename.endswith((".xlsx", ".xls")):
+            excel_attachments.append(attachment)
+        elif mime_type.startswith("image/"):
+            print(f"✓ Ignoring image: {attachment['filename']}")
         else:
+            print(f"✓ Ignoring attachment: {attachment['filename']}")
 
-            print(
-                f"✓ Ignoring attachment: "
-                f"{attachment['filename']}"
-            )
-
-    # Excel means this is a shortlist email
     excel_filepaths = []
-
     if excel_attachments:
-
-        print(
-            "\nExcel shortlist attachment detected."
-        )
-
+        print("\nExcel shortlist attachment detected.")
         for attachment in excel_attachments:
-
-            print(
-                f"\nAttachment: "
-                f"{attachment['filename']}"
-            )
-
-            attachment_id = attachment[
-                "attachment_id"
-            ]
-
+            print(f"\nAttachment: {attachment['filename']}")
+            attachment_id = attachment["attachment_id"]
             if not attachment_id:
-
-                print(
-                    "✗ Attachment ID not found."
-                )
-
+                print("✗ Attachment ID not found.")
                 continue
-
             filepath = download_attachment(
                 gmail_service,
                 message_id,
                 attachment_id,
-                attachment["filename"]
+                attachment["filename"],
             )
-
-            print(
-                f"✓ Downloaded: {filepath}"
-            )
-
+            print(f"✓ Downloaded: {filepath}")
             excel_filepaths.append(filepath)
-
     else:
+        print("\nNo Excel shortlist attachment.")
+        print("Processing as normal placement email...")
 
-        print(
-            "\nNo Excel shortlist attachment."
-        )
-
-        print(
-            "Processing as normal placement email..."
-        )
-
-    # Extract placement information (includes eligible branches)
-    print(
-        "\nSending email to Groq..."
-    )
-
+    print("\nSending email to Groq...")
     try:
-
-        placement = extract_placement_info(
-            subject,
-            body
-        )
-
+        placement = extract_placement_info(subject, body)
     except Exception as error:
+        print(f"\n✗ Groq extraction failed: {error}")
+        return False
 
-        print(
-            f"\n✗ Groq extraction failed:"
-            f" {error}"
-        )
-
-        return
-
-    print(
-        "\n" + "-" * 60
-    )
-
-    print(
-        "PLACEMENT INFORMATION"
-    )
-
-    print(
-        "-" * 60
-    )
-
-    print(
-        f"Company              : "
-        f"{placement.get('company')}"
-    )
-
-    print(
-        f"Role                 : "
-        f"{placement.get('role')}"
-    )
-
-    print(
-        f"Event Type           : "
-        f"{placement.get('event_type')}"
-    )
-
-    print(
-        f"Test Date            : "
-        f"{placement.get('test_date')}"
-    )
-
-    print(
-        f"Interview Date       : "
-        f"{placement.get('interview_date')}"
-    )
-
-    print(
-        f"Reporting Time       : "
-        f"{placement.get('reporting_time')}"
-    )
-
-    print(
-        f"Test Time            : "
-        f"{placement.get('test_time')}"
-    )
-
-    print(
-        f"Venue                : "
-        f"{placement.get('venue')}"
-    )
-
-    print(
-        f"Application Deadline : "
-        f"{placement.get('application_deadline')}"
-    )
-
-    print(
-        f"Application Link     : "
-        f"{placement.get('application_link')}"
-    )
-
-    print(
-        f"Eligible Degrees     : "
-        f"{placement.get('eligible_degrees')}"
-    )
-
-    print(
-        f"Eligible Branches    : "
-        f"{placement.get('eligible_branches')}"
-    )
-
-    print(
-        f"Open to all branches : "
-        f"{placement.get('open_to_all_branches')}"
-    )
-
-    try:
-        ensure_student_columns()
-        students = get_verified_students()
-    except Exception as error:
-        print(f"\ni Could not read student DB: {error}")
-        students = []
+    print("\n" + "-" * 60)
+    print("PLACEMENT INFORMATION")
+    print("-" * 60)
+    print(f"Company              : {placement.get('company')}")
+    print(f"Role                 : {placement.get('role')}")
+    print(f"Event Type           : {placement.get('event_type')}")
+    print(f"Test Date            : {placement.get('test_date')}")
+    print(f"Interview Date       : {placement.get('interview_date')}")
+    print(f"Reporting Time       : {placement.get('reporting_time')}")
+    print(f"Test Time            : {placement.get('test_time')}")
+    print(f"Venue                : {placement.get('venue')}")
+    print(f"Application Deadline : {placement.get('application_deadline')}")
+    print(f"Application Link     : {placement.get('application_link')}")
+    print(f"Eligible Degrees     : {placement.get('eligible_degrees')}")
+    print(f"Eligible Branches    : {placement.get('eligible_branches')}")
+    print(f"Open to all branches : {placement.get('open_to_all_branches')}")
 
     candidates = resolve_invite_candidates(
-        excel_filepaths,
-        subject,
-        body,
-        students
+        excel_filepaths, subject, body, students
     )
 
     if excel_filepaths and not candidates:
-        print(
-            "\nNo registered Neo ID / reg no on the shortlist."
-        )
-        print("Ignoring this email.")
-        processed_messages.add(message_id)
-        return
+        print("\nNo registered Neo ID / reg no on the shortlist.")
+        print("Ignoring this email for calendar.")
+        mark_students_processed(message_id, student_neo_ids)
+        return True
 
     invite_targets, skipped_branch = filter_students_by_eligibility(
-        candidates,
-        placement
+        candidates, placement
     )
 
     if skipped_branch:
@@ -707,187 +498,129 @@ def process_email(
                 f"[{student.get('degree')} {student.get('branch')}]"
             )
 
-    missing_branch = [
-        student for student in invite_targets
-        if not student.get("branch")
+    invite_targets = [
+        student for student in invite_targets if student.get("branch")
     ]
 
-    if missing_branch:
-        print(
-            "\nSkipped (branch not set on profile — "
-            "re-submit the join form with degree/branch):"
-        )
-        for student in missing_branch:
-            print(f"  - {student['neo_id']}")
-
+    already_done = get_processed_neo_ids(message_id)
+    if focus_neo_ids:
+        focus = {str(neo_id).upper() for neo_id in focus_neo_ids}
         invite_targets = [
             student for student in invite_targets
-            if student.get("branch")
+            if str(student["neo_id"]).upper() in focus
         ]
 
-    if not invite_targets:
-        print(
-            "\nNo eligible registered student for this email."
-        )
-        print("Ignoring this email.")
-        processed_messages.add(message_id)
-        return
+    pending_invites = [
+        student for student in invite_targets
+        if str(student["neo_id"]).upper() not in already_done
+    ]
 
-    print("\nEligible students for calendar invite:")
-    for student in invite_targets:
+    if not pending_invites:
+        print("\nNo new eligible students to invite for this email.")
+        mark_students_processed(message_id, student_neo_ids)
+        return True
+
+    print("\nEligible students for calendar invite (new):")
+    for student in pending_invites:
         print(
             f"  - {student['neo_id']} "
             f"[{student.get('degree')} {student.get('branch')}] "
             f"<{student['college_email']}>"
         )
 
-    # Create Google Calendar event(s)
-    print(
-        "\nAdding event to Google Calendar..."
-    )
-
+    print("\nAdding event to Google Calendar...")
     try:
-
         calendar_result = create_calendar_event(
             calendar_service,
             placement,
             attendee_emails=[
                 student["college_email"]
-                for student in invite_targets
+                for student in pending_invites
                 if student.get("college_email")
-            ]
+            ],
         )
-
     except Exception as error:
+        print(f"\n✗ Calendar event creation failed: {error}")
+        return False
 
-        print(
-            f"\n✗ Calendar event creation failed:"
-            f" {error}"
-        )
-
-        # Leave unprocessed so it can retry next run
-        return
-
-    # Soft failure (parse/API issue handled inside calendar_service)
     if calendar_result is None:
+        print("\n✗ Calendar step failed. Will retry for these students later.")
+        return False
 
-        print(
-            "\n✗ Calendar step failed."
-            " Email left unprocessed for retry."
-        )
-
-        return
-
-    # Mark as processed only after success or intentional skip
-    processed_messages.add(
-        message_id
-    )
+    mark_students_processed(message_id, student_neo_ids)
+    return True
 
 
-def main():
+def run_worker(focus_neo_ids=None, max_results=40):
+    """Process recent CDC mails. Optionally only invite focus_neo_ids."""
+    ensure_processed_table()
 
-    print(
-        "Connecting to Gmail..."
-    )
-
+    print("Connecting to Gmail...")
     gmail_service = authenticate_gmail()
+    print("✓ Gmail connected successfully.")
 
-    print(
-        "✓ Gmail connected successfully."
-    )
-
-    print(
-        "\nConnecting to Google Calendar..."
-    )
-
+    print("\nConnecting to Google Calendar...")
     calendar_service = authenticate_calendar()
+    print("✓ Google Calendar connected successfully.")
 
-    print(
-        "✓ Google Calendar connected successfully."
-    )
+    try:
+        ensure_student_columns()
+        students = get_verified_students()
+    except Exception as error:
+        print(f"\ni Could not read student DB: {error}")
+        students = []
 
-    print(
-        f"\nSearching emails from: "
-        f"{CDC_EMAIL}"
-    )
+    if focus_neo_ids:
+        focus = {str(neo_id).upper() for neo_id in focus_neo_ids}
+        students = [
+            student for student in students
+            if str(student["neo_id"]).upper() in focus
+        ]
+        joined = ", ".join(sorted(focus))
+        print(f"\nInstant backfill for: {joined}")
 
-    messages = get_cdc_emails(
-        gmail_service,
-        max_results=40
-    )
+    if not students:
+        print("\nNo matching registered students.")
+        return
 
+    print(f"\nSearching emails from: {CDC_EMAIL}")
+    messages = get_cdc_emails(gmail_service, max_results=max_results)
     if not messages:
-
-        print(
-            "\nNo CDC emails found."
-        )
-
+        print("\nNo CDC emails found.")
         return
 
-    processed_messages = (
-        load_processed_messages()
-    )
-
-    new_messages = []
-
+    student_neo_ids = [student["neo_id"] for student in students]
+    to_process = []
     for message_info in messages:
-
         message_id = message_info["id"]
-
-        if message_id in processed_messages:
+        if message_fully_handled(message_id, student_neo_ids):
             continue
+        to_process.append(message_info)
 
-        new_messages.append(
-            message_info
-        )
+    print(f"\nFound {len(messages)} CDC emails.")
+    print(f"Emails needing work for these students: {len(to_process)}")
 
-    print(
-        f"\nFound {len(messages)} CDC emails."
-    )
-
-    print(
-        f"New emails to process: "
-        f"{len(new_messages)}"
-    )
-
-    if not new_messages:
-
-        print(
-            "\nNo new emails to process."
-        )
-
+    if not to_process:
+        print("\nNothing new to process for these students.")
         return
 
-    # Process every new CDC email
-    for message_info in new_messages:
-
-        message = get_email(
-            gmail_service,
-            message_info["id"]
-        )
-
+    for message_info in to_process:
+        message = get_email(gmail_service, message_info["id"])
         process_email(
             gmail_service,
             calendar_service,
             message,
-            processed_messages
+            students,
+            focus_neo_ids=focus_neo_ids,
         )
 
-    save_processed_messages(
-        processed_messages
-    )
+    print("\n" + "=" * 60)
+    print("Processing completed.")
+    print("=" * 60)
 
-    print(
-        "\n" + "=" * 60
-    )
 
-    print(
-        "Processing completed."
-    )
-
-    print(
-        "=" * 60
-    )
+def main():
+    run_worker()
 
 
 if __name__ == "__main__":
