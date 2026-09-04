@@ -41,9 +41,11 @@ For those:
 - interview_date = the Interviews date
 - application_deadline = registration last date with time
 - eligible_branches = list of branches mentioned (e.g. ["CSE", "IT", "ECE", "EEE"]
-  or ["CSE/IT related"])
+  or ["CSE/IT related"]). NEVER leave this empty if the email lists branches.
+  Do NOT put Mechanical / Civil / etc. unless the email explicitly includes them.
 - eligible_degrees = list like ["B.Tech"] or ["M.Tech", "MBA"] when mentioned
-- open_to_all_branches = true only if email clearly says all branches / open to all
+- open_to_all_branches = true ONLY if email clearly says all branches / open to all.
+  If only CSE/IT/ECE are listed, open_to_all_branches must be false.
 - test_time / reporting_time may be null if no clock time is given
 
 Date and time rules:

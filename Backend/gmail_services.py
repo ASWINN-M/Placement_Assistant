@@ -17,7 +17,10 @@ from calendar_service import (
     create_calendar_event
 )
 from students_repo import get_verified_students, ensure_student_columns
-from eligibility import filter_students_by_eligibility
+from eligibility import (
+    enrich_placement_eligibility,
+    filter_students_by_eligibility,
+)
 from processed_repo import (
     ensure_processed_table,
     get_processed_neo_ids,
@@ -493,6 +496,10 @@ def process_email(
         # Leave unprocessed so the next 30-min run can retry.
         return "rate_limited" if "rate_limit" in str(error).lower() else False
 
+    # Always enrich from subject/body so empty/wrong LLM branch lists
+    # cannot invite Mechanical students to CSE-only drives.
+    placement = enrich_placement_eligibility(placement, subject, body)
+
     print("\n" + "-" * 60)
     print("PLACEMENT INFORMATION")
     print("-" * 60)
@@ -520,8 +527,24 @@ def process_email(
         mark_students_processed(message_id, student_neo_ids)
         return True
 
+    # Open registration without branch criteria → skip (fail closed).
+    # Excel shortlist may still invite when branches were not listed.
+    on_shortlist = bool(excel_filepaths)
+    branches = placement.get("eligible_branches") or []
+    open_all = bool(placement.get("open_to_all_branches"))
+    if not on_shortlist and not branches and not open_all:
+        print(
+            "\n✗ No eligible branches found in this email "
+            "and it is not open-to-all. Skipping invites "
+            "(avoids wrong-branch calendar adds)."
+        )
+        mark_students_processed(message_id, student_neo_ids)
+        return True
+
     invite_targets, skipped_branch = filter_students_by_eligibility(
-        candidates, placement
+        candidates,
+        placement,
+        allow_if_unspecified=on_shortlist,
     )
 
     if skipped_branch:
