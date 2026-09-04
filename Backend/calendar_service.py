@@ -1,6 +1,7 @@
 import os
 import re
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -13,6 +14,7 @@ SCOPES = [
 ]
 
 TIMEZONE = "Asia/Kolkata"
+TZ = ZoneInfo(TIMEZONE)
 
 CALENDAR_ID = "primary"
 
@@ -213,7 +215,11 @@ def build_event_title(placement, suffix=None):
         title_parts.append(event_type)
 
     if role and not suffix:
-        title_parts.append(role)
+        role_norm = str(role).strip().lower()
+        type_norm = str(event_type or "").strip().lower()
+        # Avoid "PPT & Online test - PPT & Online test"
+        if role_norm and role_norm != type_norm and role_norm not in type_norm:
+            title_parts.append(role)
 
     event_title = " - ".join(title_parts)
 
@@ -228,6 +234,185 @@ def build_reminder_overrides(reminder_minutes, methods=("popup",)):
     ]
 
 
+def now_local():
+    return datetime.now(TZ)
+
+
+def is_past_datetime(start_object: datetime) -> bool:
+    """True when a naive local start time is already over."""
+    if start_object.tzinfo is None:
+        aware = start_object.replace(tzinfo=TZ)
+    else:
+        aware = start_object.astimezone(TZ)
+    return aware < now_local()
+
+
+def is_past_all_day(date_object: datetime) -> bool:
+    """True when an all-day event's calendar day is already over."""
+    return date_object.date() < now_local().date()
+
+
+def placement_key(kind: str, company: str, date_str: str, time_str: str | None = None) -> str:
+    company_key = re.sub(r"[^a-z0-9]+", "", (company or "").lower())
+    time_key = re.sub(r"[^a-z0-9]+", "", (time_str or "allday").lower())
+    return f"{kind}:{company_key}:{date_str}:{time_key}"
+
+
+def find_event_by_placement_key(service, key: str):
+    try:
+        result = (
+            service.events()
+            .list(
+                calendarId=CALENDAR_ID,
+                privateExtendedProperty=f"placement_key={key}",
+                maxResults=5,
+                singleEvents=True,
+            )
+            .execute()
+        )
+        items = result.get("items") or []
+        return items[0] if items else None
+    except Exception as error:
+        print(f"i Could not search existing events by key: {error}")
+        return None
+
+
+def find_similar_timed_event(service, title: str, start_object: datetime):
+    """Fallback for events created before placement_key existed."""
+    aware = start_object.replace(tzinfo=TZ)
+    window_start = (aware - timedelta(minutes=5)).isoformat()
+    window_end = (aware + timedelta(minutes=5)).isoformat()
+    company_query = title.split(" - ")[0] if title else None
+    try:
+        result = (
+            service.events()
+            .list(
+                calendarId=CALENDAR_ID,
+                timeMin=window_start,
+                timeMax=window_end,
+                q=company_query,
+                singleEvents=True,
+                maxResults=20,
+            )
+            .execute()
+        )
+    except Exception as error:
+        print(f"i Could not search similar timed events: {error}")
+        return None
+
+    target = start_object.strftime("%Y-%m-%dT%H:%M:%S")
+    title_norm = (title or "").strip().lower()
+    company_norm = (company_query or "").strip().lower()
+    for item in result.get("items") or []:
+        start = (item.get("start") or {}).get("dateTime", "")
+        summary = (item.get("summary") or "").strip().lower()
+        if target not in start:
+            continue
+        if summary == title_norm or (company_norm and company_norm in summary):
+            return item
+    return None
+
+
+def find_similar_all_day_event(service, title: str, date_object: datetime):
+    day = date_object.strftime("%Y-%m-%d")
+    try:
+        result = (
+            service.events()
+            .list(
+                calendarId=CALENDAR_ID,
+                timeMin=f"{day}T00:00:00+05:30",
+                timeMax=f"{day}T23:59:59+05:30",
+                q=title.split(" - ")[0] if title else None,
+                singleEvents=True,
+                maxResults=20,
+            )
+            .execute()
+        )
+    except Exception as error:
+        print(f"i Could not search similar all-day events: {error}")
+        return None
+
+    for item in result.get("items") or []:
+        start_date = (item.get("start") or {}).get("date")
+        summary = (item.get("summary") or "").strip().lower()
+        if start_date == day and summary == (title or "").strip().lower():
+            return item
+    return None
+
+
+def merge_attendee_emails(existing_event, attendee_emails):
+    existing = {
+        (person.get("email") or "").lower()
+        for person in (existing_event.get("attendees") or [])
+        if person.get("email")
+    }
+    incoming = [email for email in (attendee_emails or []) if email]
+    merged = list(existing)
+    added = []
+    for email in incoming:
+        key = email.lower()
+        if key not in existing:
+            merged.append(email)
+            existing.add(key)
+            added.append(email)
+    return merged, added
+
+
+def upsert_event(service, event, placement_key_value, attendee_emails=None, existing=None):
+    """
+    Insert once. Later runs only add new attendees to the same event.
+    """
+    event["extendedProperties"] = {
+        "private": {
+            "placement_key": placement_key_value,
+        }
+    }
+
+    if existing is None:
+        existing = find_event_by_placement_key(service, placement_key_value)
+
+    if existing:
+        merged, added = merge_attendee_emails(existing, attendee_emails)
+        body = {
+            "attendees": [{"email": email} for email in merged],
+            "extendedProperties": {
+                "private": {
+                    "placement_key": placement_key_value,
+                }
+            },
+        }
+        updated = (
+            service.events()
+            .patch(
+                calendarId=CALENDAR_ID,
+                eventId=existing["id"],
+                body=body,
+                sendUpdates="all" if added else "none",
+            )
+            .execute()
+        )
+        if added:
+            print(
+                f"✓ Reused existing event; added {len(added)} new invite(s): "
+                f"{', '.join(added)}"
+            )
+        else:
+            print("✓ Event already exists — skipped duplicate create.")
+        return updated
+
+    event = attach_attendees(event, attendee_emails)
+    send_updates = "all" if attendee_emails else "none"
+    return (
+        service.events()
+        .insert(
+            calendarId=CALENDAR_ID,
+            body=event,
+            sendUpdates=send_updates,
+        )
+        .execute()
+    )
+
+
 def attach_attendees(event, attendee_emails):
     if attendee_emails:
         event["attendees"] = [
@@ -235,21 +420,6 @@ def attach_attendees(event, attendee_emails):
             for email in attendee_emails
         ]
     return event
-
-
-def insert_event(service, event, attendee_emails=None):
-    event = attach_attendees(event, attendee_emails)
-    send_updates = "all" if attendee_emails else "none"
-
-    return (
-        service.events()
-        .insert(
-            calendarId=CALENDAR_ID,
-            body=event,
-            sendUpdates=send_updates
-        )
-        .execute()
-    )
 
 
 def insert_timed_event(
@@ -261,9 +431,28 @@ def insert_timed_event(
     duration_hours,
     reminder_minutes,
     reminder_methods=("popup",),
-    attendee_emails=None
+    attendee_emails=None,
+    key=None,
+    kind="event",
 ):
+    if is_past_datetime(start_object):
+        print(
+            f"i Skipping past event ({kind}): "
+            f"{title} @ {start_object.strftime('%Y-%m-%d %H:%M')}"
+        )
+        return "past"
+
     end_object = start_object + timedelta(hours=duration_hours)
+    key_value = key or placement_key(
+        kind,
+        title,
+        start_object.strftime("%Y-%m-%d"),
+        start_object.strftime("%H:%M"),
+    )
+
+    existing = find_event_by_placement_key(service, key_value)
+    if not existing:
+        existing = find_similar_timed_event(service, title, start_object)
 
     event = {
         "summary": title,
@@ -286,7 +475,13 @@ def insert_timed_event(
         }
     }
 
-    return insert_event(service, event, attendee_emails)
+    return upsert_event(
+        service,
+        event,
+        key_value,
+        attendee_emails=attendee_emails,
+        existing=existing,
+    )
 
 
 def insert_all_day_event(
@@ -297,12 +492,26 @@ def insert_all_day_event(
     date_object,
     reminder_minutes,
     reminder_methods=("popup",),
-    attendee_emails=None
+    attendee_emails=None,
+    key=None,
+    kind="event",
 ):
+    if is_past_all_day(date_object):
+        print(
+            f"i Skipping past all-day event ({kind}): "
+            f"{title} on {date_object.strftime('%Y-%m-%d')}"
+        )
+        return "past"
+
     day = date_object.strftime("%Y-%m-%d")
     next_day = (
         date_object + timedelta(days=1)
     ).strftime("%Y-%m-%d")
+    key_value = key or placement_key(kind, title, day, None)
+
+    existing = find_event_by_placement_key(service, key_value)
+    if not existing:
+        existing = find_similar_all_day_event(service, title, date_object)
 
     event = {
         "summary": title,
@@ -319,19 +528,26 @@ def insert_all_day_event(
         }
     }
 
-    return insert_event(service, event, attendee_emails)
+    return upsert_event(
+        service,
+        event,
+        key_value,
+        attendee_emails=attendee_emails,
+        existing=existing,
+    )
 
 
 def create_scheduled_event(service, placement, attendee_emails=None):
     """
     Create event for test/PPT.
     Timed if test_time or reporting_time exists; otherwise all-day.
-    Returns created event, "missing" if no test_date, or None on failure.
+    Returns created event, "missing" if no test_date, "past", or None on failure.
     """
     test_date = placement.get("test_date")
     test_time = placement.get("test_time")
     reporting_time = placement.get("reporting_time")
     event_time = test_time or reporting_time
+    company = placement.get("company") or ""
 
     if not test_date:
         return "missing"
@@ -364,6 +580,13 @@ def create_scheduled_event(service, placement, attendee_emails=None):
             "%Y-%m-%dT%H:%M:%S"
         )
 
+        key = placement_key(
+            "test",
+            company,
+            parsed_date.strftime("%Y-%m-%d"),
+            formatted_time,
+        )
+
         created_event = insert_timed_event(
             service,
             title,
@@ -372,10 +595,15 @@ def create_scheduled_event(service, placement, attendee_emails=None):
             start_object,
             duration_hours=2,
             reminder_minutes=[60, 1440],
-            attendee_emails=attendee_emails
+            attendee_emails=attendee_emails,
+            key=key,
+            kind="test",
         )
 
-        print("\n✓ Placement event created successfully!")
+        if created_event == "past":
+            return "past"
+
+        print("\n✓ Placement event created/updated successfully!")
         print(f"Title: {title}")
         print(f"Date: {parsed_date.strftime('%Y-%m-%d')}")
         print(f"Time: {event_time}")
@@ -388,6 +616,13 @@ def create_scheduled_event(service, placement, attendee_emails=None):
             "creating all-day test event."
         )
 
+        key = placement_key(
+            "test",
+            company,
+            parsed_date.strftime("%Y-%m-%d"),
+            None,
+        )
+
         created_event = insert_all_day_event(
             service,
             title,
@@ -395,10 +630,15 @@ def create_scheduled_event(service, placement, attendee_emails=None):
             venue,
             parsed_date,
             reminder_minutes=[60, 1440],
-            attendee_emails=attendee_emails
+            attendee_emails=attendee_emails,
+            key=key,
+            kind="test",
         )
 
-        print("\n✓ Placement event created successfully!")
+        if created_event == "past":
+            return "past"
+
+        print("\n✓ Placement event created/updated successfully!")
         print(f"Title: {title}")
         print(f"Date: {parsed_date.strftime('%Y-%m-%d')} (all day)")
         print(f"Venue: {venue}")
@@ -413,6 +653,7 @@ def create_interview_event(service, placement, attendee_emails=None):
     Timed if test_time / reporting_time is present; otherwise all-day.
     """
     interview_date = placement.get("interview_date")
+    company = placement.get("company") or ""
 
     if not interview_date:
         return "missing"
@@ -446,6 +687,13 @@ def create_interview_event(service, placement, attendee_emails=None):
             "%Y-%m-%dT%H:%M:%S"
         )
 
+        key = placement_key(
+            "interview",
+            company,
+            parsed_date.strftime("%Y-%m-%d"),
+            formatted_time,
+        )
+
         created_event = insert_timed_event(
             service,
             title,
@@ -454,15 +702,27 @@ def create_interview_event(service, placement, attendee_emails=None):
             start_object,
             duration_hours=2,
             reminder_minutes=[60, 1440],
-            attendee_emails=attendee_emails
+            attendee_emails=attendee_emails,
+            key=key,
+            kind="interview",
         )
 
-        print("\n✓ Interview event created successfully!")
+        if created_event == "past":
+            return "past"
+
+        print("\n✓ Interview event created/updated successfully!")
         print(f"Title: {title}")
         print(f"Date: {parsed_date.strftime('%Y-%m-%d')}")
         print(f"Time: {event_time}")
         print(f"Event ID: {created_event['id']}")
     else:
+        key = placement_key(
+            "interview",
+            company,
+            parsed_date.strftime("%Y-%m-%d"),
+            None,
+        )
+
         created_event = insert_all_day_event(
             service,
             title,
@@ -470,10 +730,15 @@ def create_interview_event(service, placement, attendee_emails=None):
             venue,
             parsed_date,
             reminder_minutes=[60, 1440],
-            attendee_emails=attendee_emails
+            attendee_emails=attendee_emails,
+            key=key,
+            kind="interview",
         )
 
-        print("\n✓ Interview event created successfully!")
+        if created_event == "past":
+            return "past"
+
+        print("\n✓ Interview event created/updated successfully!")
         print(f"Title: {title}")
         print(f"Date: {parsed_date.strftime('%Y-%m-%d')} (all day)")
         print(f"Event ID: {created_event['id']}")
@@ -484,10 +749,11 @@ def create_interview_event(service, placement, attendee_emails=None):
 def create_deadline_event(service, placement, attendee_emails=None):
     """
     Create application-deadline reminder.
-    Returns created event, "missing" if no deadline,
+    Returns created event, "missing" if no deadline, "past",
     or None on parse failure.
     """
     application_deadline = placement.get("application_deadline")
+    company = placement.get("company") or ""
 
     if not application_deadline:
         return "missing"
@@ -516,6 +782,13 @@ def create_deadline_event(service, placement, attendee_emails=None):
             "%Y-%m-%dT%H:%M:%S"
         )
 
+        key = placement_key(
+            "deadline",
+            company,
+            parsed_date.strftime("%Y-%m-%d"),
+            parsed_time,
+        )
+
         # Short timed block so the deadline is visible
         created_event = insert_timed_event(
             service,
@@ -526,9 +799,18 @@ def create_deadline_event(service, placement, attendee_emails=None):
             duration_hours=1,
             reminder_minutes=[60],
             reminder_methods=("popup", "email"),
-            attendee_emails=attendee_emails
+            attendee_emails=attendee_emails,
+            key=key,
+            kind="deadline",
         )
     else:
+        key = placement_key(
+            "deadline",
+            company,
+            parsed_date.strftime("%Y-%m-%d"),
+            None,
+        )
+
         created_event = insert_all_day_event(
             service,
             title,
@@ -537,10 +819,15 @@ def create_deadline_event(service, placement, attendee_emails=None):
             parsed_date,
             reminder_minutes=[60],
             reminder_methods=("popup", "email"),
-            attendee_emails=attendee_emails
+            attendee_emails=attendee_emails,
+            key=key,
+            kind="deadline",
         )
 
-    print("\n✓ Deadline reminder created successfully!")
+    if created_event == "past":
+        return "past"
+
+    print("\n✓ Deadline reminder created/updated successfully!")
     print(f"Title: {title}")
     print(f"Deadline: {application_deadline}")
     print("Notification: 1 hour before deadline (popup + email)")
@@ -559,8 +846,8 @@ def create_calendar_event(service, placement, attendee_emails=None):
       - interview date (sometimes without time)
 
     Returns:
-      - list of created events on success
-      - "skipped" when nothing scheduleable
+      - list of created/updated events on success
+      - "skipped" when nothing scheduleable / all past
       - None on failure (leave email unprocessed)
     """
     company = placement.get("company")
@@ -588,6 +875,7 @@ def create_calendar_event(service, placement, attendee_emails=None):
     created_events = []
     attempted = False
     failed = False
+    saw_past = False
 
     creators = []
 
@@ -606,17 +894,28 @@ def create_calendar_event(service, placement, attendee_emails=None):
 
         if result is None:
             failed = True
-        elif result != "missing":
+        elif result == "missing":
+            continue
+        elif result == "past":
+            saw_past = True
+        else:
             created_events.append(result)
 
     if failed:
         return None
 
-    if not created_events and attempted:
-        print("✗ Could not create any calendar events.")
-        return None
+    if created_events:
+        return created_events
 
-    return created_events
+    if attempted and saw_past:
+        print("\ni All dates for this mail are already over — skipped.")
+        return "skipped"
+
+    if attempted:
+        print("\ni Nothing new to put on calendar.")
+        return "skipped"
+
+    return "skipped"
 
 
 def test_calendar():

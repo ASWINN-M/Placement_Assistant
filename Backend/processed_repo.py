@@ -1,6 +1,11 @@
 from sqlalchemy import select
 
-from db import StudentMessageProcessed, get_db_session, init_db
+from db import (
+    PlacementExtractionCache,
+    StudentMessageProcessed,
+    get_db_session,
+    init_db,
+)
 from students_repo import ensure_student_columns
 
 
@@ -64,3 +69,36 @@ def message_fully_handled(message_id: str, student_neo_ids) -> bool:
     processed = get_processed_neo_ids(message_id)
     current = {str(neo_id).upper() for neo_id in student_neo_ids}
     return current <= processed
+
+
+def get_cached_placement(message_id: str):
+    session = get_db_session()
+
+    try:
+        row = session.get(PlacementExtractionCache, message_id)
+        if not row:
+            return None
+        return row.placement_json
+    finally:
+        session.close()
+
+
+def save_cached_placement(message_id: str, subject: str, placement: dict) -> None:
+    session = get_db_session()
+
+    try:
+        existing = session.get(PlacementExtractionCache, message_id)
+        if existing:
+            existing.subject = (subject or "")[:512]
+            existing.placement_json = placement
+        else:
+            session.add(
+                PlacementExtractionCache(
+                    message_id=message_id,
+                    subject=(subject or "")[:512],
+                    placement_json=placement,
+                )
+            )
+        session.commit()
+    finally:
+        session.close()

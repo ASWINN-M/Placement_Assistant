@@ -15,6 +15,7 @@ from sqlalchemy.orm import (
     mapped_column,
     sessionmaker,
 )
+from sqlalchemy.types import JSON
 
 
 load_dotenv()
@@ -121,6 +122,21 @@ class StudentMessageProcessed(Base):
     message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     neo_id: Mapped[str] = mapped_column(String(32), primary_key=True)
     processed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+
+class PlacementExtractionCache(Base):
+    """Caches Groq extraction per Gmail message to avoid repeat token use."""
+
+    __tablename__ = "placement_extraction_cache"
+
+    message_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    placement_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
         nullable=False

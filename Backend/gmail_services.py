@@ -1,6 +1,9 @@
 import os
 import base64
 import json
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 
 from google.auth.transport.requests import Request
@@ -20,6 +23,8 @@ from processed_repo import (
     get_processed_neo_ids,
     mark_students_processed,
     message_fully_handled,
+    get_cached_placement,
+    save_cached_placement,
 )
 
 
@@ -31,6 +36,9 @@ SCOPES = [
 CDC_EMAIL = "students.cdc2027@vitap.ac.in"
 
 STUDENT_ID = "I5Y4H3N6"
+
+# Worker timezone — "current date" means today in IST when the job runs
+IST = ZoneInfo("Asia/Kolkata")
 
 
 def authenticate_gmail():
@@ -81,10 +89,28 @@ def authenticate_gmail():
     return service
 
 
-def get_cdc_emails(service, max_results=20):
+def get_cdc_emails(service, max_results=20, current_day_only=True):
+    """
+    List CDC mails for the current IST calendar day of this run.
+
+    When Actions runs every 30 min, each run only sees mail from "today"
+    (Asia/Kolkata) at that moment — not old inbox history.
+    """
+    query = f"from:{CDC_EMAIL}"
+
+    if current_day_only:
+        today = datetime.now(IST).date()
+        # Gmail after: is exclusive of that calendar day, so use yesterday
+        # as after and tomorrow as before to cover "today" IST.
+        after = (today - timedelta(days=1)).strftime("%Y/%m/%d")
+        before = (today + timedelta(days=1)).strftime("%Y/%m/%d")
+        query = f"{query} after:{after} before:{before}"
+        print(f"Current run date (IST): {today.isoformat()}")
+
+    print(f"Gmail query: {query}")
     results = service.users().messages().list(
         userId="me",
-        q=f"from:{CDC_EMAIL}",
+        q=query,
         maxResults=max_results
     ).execute()
 
@@ -452,12 +478,20 @@ def process_email(
         print("\nNo Excel shortlist attachment.")
         print("Processing as normal placement email...")
 
-    print("\nSending email to Groq...")
     try:
-        placement = extract_placement_info(subject, body)
+        cached = get_cached_placement(message_id)
+        if cached:
+            print("\n✓ Using cached extraction (no Groq call).")
+            placement = cached
+        else:
+            print("\nSending email to Groq...")
+            placement = extract_placement_info(subject, body)
+            save_cached_placement(message_id, subject, placement)
+            print("✓ Extraction cached for other students.")
     except Exception as error:
         print(f"\n✗ Groq extraction failed: {error}")
-        return False
+        # Leave unprocessed so the next 30-min run can retry.
+        return "rate_limited" if "rate_limit" in str(error).lower() else False
 
     print("\n" + "-" * 60)
     print("PLACEMENT INFORMATION")
@@ -547,12 +581,25 @@ def process_email(
         print("\n✗ Calendar step failed. Will retry for these students later.")
         return False
 
+    if calendar_result == "skipped":
+        print("\ni Nothing to put on calendar for this mail.")
+
     mark_students_processed(message_id, student_neo_ids)
     return True
 
 
-def run_worker(focus_neo_ids=None, max_results=40):
-    """Process recent CDC mails. Optionally only invite focus_neo_ids."""
+def run_worker(
+    focus_neo_ids=None,
+    max_results=15,
+    current_day_only=True,
+    max_emails=10,
+):
+    """
+    Process CDC mails for the current IST date of this run.
+
+    - Scheduled every 30 min: only today's mail, resume via cache/processed.
+    - Join backfill: focus_neo_ids limits shortlist checks to that student.
+    """
     ensure_processed_table()
 
     print("Connecting to Gmail...")
@@ -578,15 +625,20 @@ def run_worker(focus_neo_ids=None, max_results=40):
         ]
         joined = ", ".join(sorted(focus))
         print(f"\nInstant backfill for: {joined}")
+        print("Shortlist checks use only this student's Neo ID / reg no.")
 
     if not students:
         print("\nNo matching registered students.")
         return
 
     print(f"\nSearching emails from: {CDC_EMAIL}")
-    messages = get_cdc_emails(gmail_service, max_results=max_results)
+    messages = get_cdc_emails(
+        gmail_service,
+        max_results=max_results,
+        current_day_only=current_day_only,
+    )
     if not messages:
-        print("\nNo CDC emails found.")
+        print("\nNo CDC emails found for the current date.")
         return
 
     student_neo_ids = [student["neo_id"] for student in students]
@@ -597,22 +649,36 @@ def run_worker(focus_neo_ids=None, max_results=40):
             continue
         to_process.append(message_info)
 
-    print(f"\nFound {len(messages)} CDC emails.")
-    print(f"Emails needing work for these students: {len(to_process)}")
+    print(f"\nFound {len(messages)} CDC emails for current date.")
+    print(f"Already handled for these students: {len(messages) - len(to_process)}")
+    print(f"Emails needing work: {len(to_process)}")
 
     if not to_process:
         print("\nNothing new to process for these students.")
         return
 
+    if max_emails and len(to_process) > max_emails:
+        print(
+            f"Processing first {max_emails} this run; "
+            "rest resume on the next 30-min cycle."
+        )
+        to_process = to_process[:max_emails]
+
     for message_info in to_process:
         message = get_email(gmail_service, message_info["id"])
-        process_email(
+        result = process_email(
             gmail_service,
             calendar_service,
             message,
             students,
             focus_neo_ids=focus_neo_ids,
         )
+        if result == "rate_limited":
+            print(
+                "\ni Groq rate limit hit — stopping this run. "
+                "Next scheduled run will continue from here."
+            )
+            break
 
     print("\n" + "=" * 60)
     print("Processing completed.")
@@ -620,7 +686,12 @@ def run_worker(focus_neo_ids=None, max_results=40):
 
 
 def main():
-    run_worker()
+    # Every Actions run uses the current IST date at that moment.
+    run_worker(
+        max_results=15,
+        current_day_only=True,
+        max_emails=10,
+    )
 
 
 if __name__ == "__main__":

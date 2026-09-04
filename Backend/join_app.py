@@ -120,6 +120,40 @@ def join(payload: JoinRequest):
                 detail="This Neo ID is already registered with another email."
             )
 
+        # Already registered with same Neo ID + college email → no OTP
+        if existing and existing.college_email.lower() == email:
+            existing.name = name
+            existing.reg_no = reg_no
+            existing.degree = degree
+            existing.branch = branch
+            session.commit()
+
+            def _backfill(neo=neo_id):
+                try:
+                    from gmail_services import run_worker
+
+                    # Only this Neo ID / reg no; current IST date only.
+                    run_worker(
+                        focus_neo_ids=[neo],
+                        max_results=15,
+                        current_day_only=True,
+                        max_emails=10,
+                    )
+                except Exception as error:
+                    print(f"Instant backfill failed for {neo}: {error}")
+
+
+            Thread(target=_backfill, daemon=True).start()
+
+            return {
+                "already_registered": True,
+                "backfill": "started",
+                "message": (
+                    "You're already registered. "
+                    "Checking recent placement emails for you now."
+                ),
+            }
+
         email_owner = session.scalar(
             select(Student).where(
                 func.lower(Student.college_email) == email
@@ -248,7 +282,13 @@ def verify(payload: VerifyRequest):
         try:
             from gmail_services import run_worker
 
-            run_worker(focus_neo_ids=[neo_id], max_results=40)
+            # Only this student's Neo ID / reg no; current IST date only.
+            run_worker(
+                focus_neo_ids=[neo_id],
+                max_results=15,
+                current_day_only=True,
+                max_emails=10,
+            )
         except Exception as error:
             print(f"Instant backfill failed for {neo_id}: {error}")
 

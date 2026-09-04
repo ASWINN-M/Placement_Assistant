@@ -205,6 +205,16 @@
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || "Could not start verification.");
 
+        if (data.already_registered) {
+          joinForm.classList.add("hidden");
+          done.classList.remove("hidden");
+          const doneMsg = document.querySelector("#done .msg");
+          doneMsg.className = "msg ok";
+          doneMsg.textContent =
+            data.message || "You're already registered.";
+          return;
+        }
+
         document.getElementById("pending_id").value = data.pending_id;
         document.getElementById("otp-lede").textContent =
           "Enter the 6-digit code sent to " + body.college_email + ".";
