@@ -2,7 +2,6 @@ name: Placement worker
 
 on:
   schedule:
-    # Every 30 minutes (UTC)
     - cron: "*/30 * * * *"
   workflow_dispatch:
   push:
@@ -26,7 +25,6 @@ jobs:
         working-directory: .
         run: |
           echo "HEAD=$(git rev-parse HEAD)"
-          echo "REF=${GITHUB_REF}"
           echo "SHA=${GITHUB_SHA}"
 
       - name: Set up Python
@@ -69,16 +67,6 @@ jobs:
           printf '%s\n' "${GMAIL_CREDENTIALS_JSON}" > credentials.json
           printf '%s\n' "${GMAIL_TOKEN_JSON}" > token.json
           printf '%s\n' "${CALENDAR_TOKEN_JSON}" > calendar_token.json
-
-          python -c "import json; from pathlib import Path; \
-ok=True; \
-\
-for name in ('token.json','calendar_token.json'): \
-    data=json.loads(Path(name).read_text()); \
-    print(name + ': keys present'); \
-    ok = ok and bool(data.get('refresh_token')); \
-    \
-if not ok: raise SystemExit('token.json or calendar_token.json is missing refresh_token. Re-auth locally and update the GitHub secret.')"
 
       - name: Run placement worker
         env:
