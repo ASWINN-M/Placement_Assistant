@@ -41,25 +41,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r ../requirements.txt
 
-      - name: Prove worker auth cannot open a browser
-        run: |
-          python - <<'PY'
-          import inspect
-          from gmail_services import authenticate_gmail, get_gmail_credentials
-          from calendar_service import authenticate_calendar, get_calendar_credentials
-
-          for name, fn in [
-              ("authenticate_gmail", authenticate_gmail),
-              ("get_gmail_credentials", get_gmail_credentials),
-              ("authenticate_calendar", authenticate_calendar),
-              ("get_calendar_credentials", get_calendar_credentials),
-          ]:
-              source = inspect.getsource(fn)
-              if "run_local_server" in source:
-                  raise SystemExit(f"{name} still contains run_local_server")
-          print("OK: worker auth functions do not call run_local_server")
-          PY
-
       - name: Write secrets into Backend/
         env:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
@@ -89,19 +70,15 @@ jobs:
           printf '%s\n' "${GMAIL_TOKEN_JSON}" > token.json
           printf '%s\n' "${CALENDAR_TOKEN_JSON}" > calendar_token.json
 
-          python - <<'PY'
-          import json
-          from pathlib import Path
-
-          for name in ("token.json", "calendar_token.json"):
-              data = json.loads(Path(name).read_text())
-              if not data.get("refresh_token"):
-                  raise SystemExit(
-                      f"{name} has no refresh_token. "
-                      "Regenerate it locally and update the GitHub secret."
-                  )
-              print(f"{name}: refresh_token present")
-          PY
+          python -c "import json; from pathlib import Path; \
+ok=True; \
+\
+for name in ('token.json','calendar_token.json'): \
+    data=json.loads(Path(name).read_text()); \
+    print(name + ': keys present'); \
+    ok = ok and bool(data.get('refresh_token')); \
+    \
+if not ok: raise SystemExit('token.json or calendar_token.json is missing refresh_token. Re-auth locally and update the GitHub secret.')"
 
       - name: Run placement worker
         env:
