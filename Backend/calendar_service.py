@@ -1,6 +1,7 @@
 import os
 import re
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from google.auth.transport.requests import Request
@@ -12,6 +13,10 @@ from googleapiclient.discovery import build
 SCOPES = [
     "https://www.googleapis.com/auth/calendar"
 ]
+
+BASE_DIR = Path(__file__).resolve().parent
+CALENDAR_TOKEN_FILE = BASE_DIR / "calendar_token.json"
+CREDENTIALS_FILE = BASE_DIR / "credentials.json"
 
 TIMEZONE = "Asia/Kolkata"
 TZ = ZoneInfo(TIMEZONE)
@@ -37,38 +42,56 @@ TIME_FORMATS = [
 ]
 
 
-def authenticate_calendar():
-    creds = None
+def running_in_github_actions() -> bool:
+    return os.getenv("GITHUB_ACTIONS") == "true"
 
-    if os.path.exists("calendar_token.json"):
-        creds = Credentials.from_authorized_user_file(
-            "calendar_token.json",
-            SCOPES
+
+def get_calendar_credentials() -> Credentials:
+    """
+    Use the pre-authorized calendar token first. Refresh it when expired.
+    Interactive browser OAuth is local-only — never start it in CI.
+    """
+    credentials = None
+
+    if CALENDAR_TOKEN_FILE.exists():
+        credentials = Credentials.from_authorized_user_file(
+            str(CALENDAR_TOKEN_FILE),
+            SCOPES,
         )
 
-    if not creds or not creds.valid:
+    if credentials and credentials.expired and credentials.refresh_token:
+        try:
+            credentials.refresh(Request())
+            CALENDAR_TOKEN_FILE.write_text(credentials.to_json())
+        except Exception as error:
+            print(f"Calendar token refresh failed: {error}")
+            credentials = None
 
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+    if credentials and credentials.valid:
+        return credentials
 
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json",
-                SCOPES
-            )
+    if running_in_github_actions():
+        raise RuntimeError(
+            "calendar_token.json is missing, invalid, or cannot be refreshed "
+            "in CI. Generate a refreshable OAuth token locally and store it "
+            "as the CALENDAR_TOKEN_JSON GitHub secret."
+        )
 
-            creds = flow.run_local_server(port=0)
+    if not CREDENTIALS_FILE.exists():
+        raise FileNotFoundError(f"Missing {CREDENTIALS_FILE}")
 
-        with open("calendar_token.json", "w") as token:
-            token.write(creds.to_json())
-
-    service = build(
-        "calendar",
-        "v3",
-        credentials=creds
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(CREDENTIALS_FILE),
+        SCOPES,
     )
+    credentials = flow.run_local_server(port=0)
+    CALENDAR_TOKEN_FILE.write_text(credentials.to_json())
+    return credentials
 
-    return service
+
+def authenticate_calendar():
+    credentials = get_calendar_credentials()
+    return build("calendar", "v3", credentials=credentials)
 
 
 def _normalize_time_text(time_string):

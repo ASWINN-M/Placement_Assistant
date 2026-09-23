@@ -2,6 +2,7 @@ import os
 import base64
 import json
 from datetime import datetime, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -36,6 +37,10 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.send"
 ]
 
+BASE_DIR = Path(__file__).resolve().parent
+TOKEN_FILE = BASE_DIR / "token.json"
+CREDENTIALS_FILE = BASE_DIR / "credentials.json"
+
 CDC_EMAIL = "students.cdc2027@vitap.ac.in"
 
 STUDENT_ID = "I5Y4H3N6"
@@ -44,16 +49,24 @@ STUDENT_ID = "I5Y4H3N6"
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def authenticate_gmail():
-    creds = None
+def running_in_github_actions() -> bool:
+    return os.getenv("GITHUB_ACTIONS") == "true"
 
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file(
-            "token.json",
-            SCOPES
+
+def get_gmail_credentials() -> Credentials:
+    """
+    Use the pre-authorized token first. Refresh it when expired.
+    Interactive browser OAuth is local-only — never start it in CI.
+    """
+    credentials = None
+
+    if TOKEN_FILE.exists():
+        credentials = Credentials.from_authorized_user_file(
+            str(TOKEN_FILE),
+            SCOPES,
         )
 
-        granted = set(creds.scopes or [])
+        granted = set(credentials.scopes or [])
         required = set(SCOPES)
 
         # Old tokens may only have gmail.readonly
@@ -62,34 +75,41 @@ def authenticate_gmail():
                 "Gmail token is missing send permission. "
                 "Re-authorizing..."
             )
-            creds = None
+            credentials = None
 
-    if not creds or not creds.valid:
+    if credentials and credentials.expired and credentials.refresh_token:
+        try:
+            credentials.refresh(Request())
+            TOKEN_FILE.write_text(credentials.to_json())
+        except Exception as error:
+            print(f"Gmail token refresh failed: {error}")
+            credentials = None
 
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception:
-                creds = None
+    if credentials and credentials.valid:
+        return credentials
 
-        if not creds or not creds.valid:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "credentials.json",
-                SCOPES
-            )
+    if running_in_github_actions():
+        raise RuntimeError(
+            "token.json is missing, invalid, or cannot be refreshed in CI. "
+            "Generate a refreshable OAuth token locally and store it as "
+            "the GMAIL_TOKEN_JSON GitHub secret."
+        )
 
-            creds = flow.run_local_server(port=0)
+    if not CREDENTIALS_FILE.exists():
+        raise FileNotFoundError(f"Missing {CREDENTIALS_FILE}")
 
-        with open("token.json", "w") as token:
-            token.write(creds.to_json())
-
-    service = build(
-        "gmail",
-        "v1",
-        credentials=creds
+    flow = InstalledAppFlow.from_client_secrets_file(
+        str(CREDENTIALS_FILE),
+        SCOPES,
     )
+    credentials = flow.run_local_server(port=0)
+    TOKEN_FILE.write_text(credentials.to_json())
+    return credentials
 
-    return service
+
+def authenticate_gmail():
+    credentials = get_gmail_credentials()
+    return build("gmail", "v1", credentials=credentials)
 
 
 def get_cdc_emails(service, max_results=20, current_day_only=True):
