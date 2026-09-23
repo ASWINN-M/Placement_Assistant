@@ -1,13 +1,11 @@
-import os
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+from google_oauth import get_google_credentials
 
 
 SCOPES = [
@@ -42,51 +40,14 @@ TIME_FORMATS = [
 ]
 
 
-def running_in_github_actions() -> bool:
-    return os.getenv("GITHUB_ACTIONS") == "true"
-
-
-def get_calendar_credentials() -> Credentials:
-    """
-    Use the pre-authorized calendar token first. Refresh it when expired.
-    Interactive browser OAuth is local-only — never start it in CI.
-    """
-    credentials = None
-
-    if CALENDAR_TOKEN_FILE.exists():
-        credentials = Credentials.from_authorized_user_file(
-            str(CALENDAR_TOKEN_FILE),
-            SCOPES,
-        )
-
-    if credentials and credentials.expired and credentials.refresh_token:
-        try:
-            credentials.refresh(Request())
-            CALENDAR_TOKEN_FILE.write_text(credentials.to_json())
-        except Exception as error:
-            print(f"Calendar token refresh failed: {error}")
-            credentials = None
-
-    if credentials and credentials.valid:
-        return credentials
-
-    if running_in_github_actions():
-        raise RuntimeError(
-            "calendar_token.json is missing, invalid, or cannot be refreshed "
-            "in CI. Generate a refreshable OAuth token locally and store it "
-            "as the CALENDAR_TOKEN_JSON GitHub secret."
-        )
-
-    if not CREDENTIALS_FILE.exists():
-        raise FileNotFoundError(f"Missing {CREDENTIALS_FILE}")
-
-    flow = InstalledAppFlow.from_client_secrets_file(
-        str(CREDENTIALS_FILE),
+def get_calendar_credentials():
+    return get_google_credentials(
+        CALENDAR_TOKEN_FILE,
+        CREDENTIALS_FILE,
         SCOPES,
+        label="Calendar",
+        secret_name="CALENDAR_TOKEN_JSON",
     )
-    credentials = flow.run_local_server(port=0)
-    CALENDAR_TOKEN_FILE.write_text(credentials.to_json())
-    return credentials
 
 
 def authenticate_calendar():

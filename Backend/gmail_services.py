@@ -7,10 +7,9 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+from google_oauth import get_google_credentials
 
 from llm_extractor import extract_placement_info
 from calendar_service import (
@@ -49,62 +48,14 @@ STUDENT_ID = "I5Y4H3N6"
 IST = ZoneInfo("Asia/Kolkata")
 
 
-def running_in_github_actions() -> bool:
-    return os.getenv("GITHUB_ACTIONS") == "true"
-
-
-def get_gmail_credentials() -> Credentials:
-    """
-    Use the pre-authorized token first. Refresh it when expired.
-    Interactive browser OAuth is local-only — never start it in CI.
-    """
-    credentials = None
-
-    if TOKEN_FILE.exists():
-        credentials = Credentials.from_authorized_user_file(
-            str(TOKEN_FILE),
-            SCOPES,
-        )
-
-        granted = set(credentials.scopes or [])
-        required = set(SCOPES)
-
-        # Old tokens may only have gmail.readonly
-        if not required.issubset(granted):
-            print(
-                "Gmail token is missing send permission. "
-                "Re-authorizing..."
-            )
-            credentials = None
-
-    if credentials and credentials.expired and credentials.refresh_token:
-        try:
-            credentials.refresh(Request())
-            TOKEN_FILE.write_text(credentials.to_json())
-        except Exception as error:
-            print(f"Gmail token refresh failed: {error}")
-            credentials = None
-
-    if credentials and credentials.valid:
-        return credentials
-
-    if running_in_github_actions():
-        raise RuntimeError(
-            "token.json is missing, invalid, or cannot be refreshed in CI. "
-            "Generate a refreshable OAuth token locally and store it as "
-            "the GMAIL_TOKEN_JSON GitHub secret."
-        )
-
-    if not CREDENTIALS_FILE.exists():
-        raise FileNotFoundError(f"Missing {CREDENTIALS_FILE}")
-
-    flow = InstalledAppFlow.from_client_secrets_file(
-        str(CREDENTIALS_FILE),
+def get_gmail_credentials():
+    return get_google_credentials(
+        TOKEN_FILE,
+        CREDENTIALS_FILE,
         SCOPES,
+        label="Gmail",
+        secret_name="GMAIL_TOKEN_JSON",
     )
-    credentials = flow.run_local_server(port=0)
-    TOKEN_FILE.write_text(credentials.to_json())
-    return credentials
 
 
 def authenticate_gmail():

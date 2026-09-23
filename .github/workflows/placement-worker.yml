@@ -5,6 +5,11 @@ on:
     # Every 30 minutes (UTC)
     - cron: "*/30 * * * *"
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "Backend/**"
+      - ".github/workflows/placement-worker.yml"
 
 jobs:
   run-worker:
@@ -17,6 +22,13 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Show commit being used
+        working-directory: .
+        run: |
+          echo "HEAD=$(git rev-parse HEAD)"
+          echo "REF=${GITHUB_REF}"
+          echo "SHA=${GITHUB_SHA}"
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -28,6 +40,25 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r ../requirements.txt
+
+      - name: Prove worker auth cannot open a browser
+        run: |
+          python - <<'PY'
+          import inspect
+          from gmail_services import authenticate_gmail, get_gmail_credentials
+          from calendar_service import authenticate_calendar, get_calendar_credentials
+
+          for name, fn in [
+              ("authenticate_gmail", authenticate_gmail),
+              ("get_gmail_credentials", get_gmail_credentials),
+              ("authenticate_calendar", authenticate_calendar),
+              ("get_calendar_credentials", get_calendar_credentials),
+          ]:
+              source = inspect.getsource(fn)
+              if "run_local_server" in source:
+                  raise SystemExit(f"{name} still contains run_local_server")
+          print("OK: worker auth functions do not call run_local_server")
+          PY
 
       - name: Write secrets into Backend/
         env:
@@ -58,5 +89,22 @@ jobs:
           printf '%s\n' "${GMAIL_TOKEN_JSON}" > token.json
           printf '%s\n' "${CALENDAR_TOKEN_JSON}" > calendar_token.json
 
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          for name in ("token.json", "calendar_token.json"):
+              data = json.loads(Path(name).read_text())
+              if not data.get("refresh_token"):
+                  raise SystemExit(
+                      f"{name} has no refresh_token. "
+                      "Regenerate it locally and update the GitHub secret."
+                  )
+              print(f"{name}: refresh_token present")
+          PY
+
       - name: Run placement worker
+        env:
+          GITHUB_ACTIONS: "true"
+          CI: "true"
         run: python gmail_services.py
