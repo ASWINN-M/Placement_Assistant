@@ -1,4 +1,5 @@
 import os
+import re
 import base64
 import json
 from datetime import datetime, timedelta
@@ -17,10 +18,7 @@ from calendar_service import (
     create_calendar_event
 )
 from students_repo import get_verified_students, ensure_student_columns
-from eligibility import (
-    enrich_placement_eligibility,
-    filter_students_by_eligibility,
-)
+from eligibility import enrich_placement_eligibility
 from processed_repo import (
     ensure_processed_table,
     get_processed_neo_ids,
@@ -234,44 +232,55 @@ def download_attachment(
     return filepath
 
 
+def _normalize_id(value) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def student_id_in_values(student, values) -> bool:
+    """True only when this student's Neo ID or reg no is present."""
+    neo_id = _normalize_id(student.get("neo_id"))
+    reg_no = _normalize_id(student.get("reg_no"))
+
+    if neo_id and len(neo_id) >= 6 and neo_id in values:
+        return True
+    if reg_no and len(reg_no) >= 6 and reg_no in values:
+        return True
+    return False
+
+
+def id_appears_in_text(identifier: str, text: str) -> bool:
+    ident = (identifier or "").strip()
+    if len(_normalize_id(ident)) < 6:
+        return False
+    pattern = r"(?<![A-Za-z0-9])" + re.escape(ident) + r"(?![A-Za-z0-9])"
+    return bool(re.search(pattern, text or "", flags=re.IGNORECASE))
+
+
 def find_registered_in_excel(filepath, students):
     df = pd.read_excel(filepath)
     sheet_values = set()
 
     for column in df.columns:
-        sheet_values.update(
-            df[column]
-            .astype(str)
-            .str.strip()
-            .str.lower()
-            .tolist()
-        )
+        for raw in df[column].astype(str).tolist():
+            normalized = _normalize_id(raw)
+            if normalized and normalized not in {"nan", "none"}:
+                sheet_values.add(normalized)
 
-    matched = []
-
-    for student in students:
-        neo_id = str(student["neo_id"]).strip().lower()
-        reg_no = str(student.get("reg_no") or "").strip().lower()
-
-        if neo_id in sheet_values or (reg_no and reg_no in sheet_values):
-            matched.append(student)
-
-    return matched
+    return [
+        student for student in students
+        if student_id_in_values(student, sheet_values)
+    ]
 
 
 def students_mentioned_in_text(text, students):
-    haystack = (text or "").lower()
+    haystack = text or ""
     matched = []
 
     for student in students:
-        neo_id = str(student["neo_id"]).strip().lower()
-        reg_no = str(student.get("reg_no") or "").strip().lower()
+        neo_id = str(student.get("neo_id") or "").strip()
+        reg_no = str(student.get("reg_no") or "").strip()
 
-        if neo_id and neo_id in haystack:
-            matched.append(student)
-            continue
-
-        if reg_no and len(reg_no) >= 6 and reg_no in haystack:
+        if id_appears_in_text(neo_id, haystack) or id_appears_in_text(reg_no, haystack):
             matched.append(student)
 
     return matched
@@ -279,8 +288,9 @@ def students_mentioned_in_text(text, students):
 
 def resolve_invite_candidates(excel_filepaths, subject, body, students):
     """
-    Shortlist Excel / IDs in mail → only students whose Neo ID or reg no appears.
-    Open registration (no IDs) → all verified students (branch filter applied later).
+    Invite only students whose Neo ID or registration number appears
+    in an Excel shortlist or in the email text. Never fall back to
+    every student in the database.
     """
     if not students:
         print("\ni No registered students in DB yet.")
@@ -328,11 +338,10 @@ def resolve_invite_candidates(excel_filepaths, subject, body, students):
         return mentioned
 
     print(
-        "\nNo Neo ID / reg no in this email "
-        "(open registration / drive). "
-        "Will filter by branch next."
+        "\nNo registered Neo ID / reg no in this email or attachment. "
+        "Skipping calendar invites (will not spam all students)."
     )
-    return list(students)
+    return []
 
 
 def check_student_shortlisted(
@@ -492,42 +501,15 @@ def process_email(
         excel_filepaths, subject, body, students
     )
 
-    if excel_filepaths and not candidates:
-        print("\nNo registered Neo ID / reg no on the shortlist.")
+    if not candidates:
         print("Ignoring this email for calendar.")
         mark_students_processed(message_id, student_neo_ids)
         return True
 
-    # Open registration without branch criteria → skip (fail closed).
-    # Excel shortlist may still invite when branches were not listed.
-    on_shortlist = bool(excel_filepaths)
-    branches = placement.get("eligible_branches") or []
-    open_all = bool(placement.get("open_to_all_branches"))
-    if not on_shortlist and not branches and not open_all:
-        print(
-            "\n✗ No eligible branches found in this email "
-            "and it is not open-to-all. Skipping invites "
-            "(avoids wrong-branch calendar adds)."
-        )
-        mark_students_processed(message_id, student_neo_ids)
-        return True
-
-    invite_targets, skipped_branch = filter_students_by_eligibility(
-        candidates,
-        placement,
-        allow_if_unspecified=on_shortlist,
-    )
-
-    if skipped_branch:
-        print("\nSkipped (branch/degree not eligible):")
-        for student in skipped_branch:
-            print(
-                f"  - {student['neo_id']} "
-                f"[{student.get('degree')} {student.get('branch')}]"
-            )
-
+    # These students were named by Neo ID / reg no. That is the invite list.
     invite_targets = [
-        student for student in invite_targets if student.get("branch")
+        student for student in candidates
+        if student.get("neo_id") and student.get("college_email")
     ]
 
     already_done = get_processed_neo_ids(message_id)
